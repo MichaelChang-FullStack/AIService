@@ -1,0 +1,195 @@
+import os
+import streamlit as st
+from docx_analyzer import extract_headings, merge_heading_structures, get_sample_headings
+from proposal_writer import gpt_generate, write_proposal_docx
+from file_reader import extract_template_info
+
+st.title("🤖 AI 服務建議書生成器")
+
+# 文件上傳區域
+st.header("📄 選擇範本文件")
+st.write("上傳現有的服務建議書作為範本（支援 .docx 和 .pdf 文件）")
+
+uploaded_file = st.file_uploader(
+    "選擇範本文件",
+    type=['docx', 'pdf'],
+    help="上傳您想要作為範本的服務建議書文件，系統會分析其結構並生成類似內容"
+)
+
+template_content = None
+template_analyzer = None
+template_file_type = None
+outline_titles = []
+
+if uploaded_file is not None:
+    # 保存上傳的文件到臨時位置
+    temp_path = f"temp_template.{uploaded_file.name.split('.')[-1]}"
+    with open(temp_path, "wb") as f:
+        f.write(uploaded_file.getvalue())
+
+    try:
+        # 讀取和分析範本文件
+        with st.spinner('正在分析範本文件...'):
+            template_content, template_analyzer, template_file_type = extract_template_info(temp_path)
+
+        st.success(f"✅ 成功讀取範本文件（{template_file_type.upper()}）")
+
+        # 從範本中提取章節結構
+        outline_titles = template_analyzer.get_section_titles()
+        if not outline_titles:
+            # 如果無法自動分析，使用預設結構
+            outline_titles = [t[1] for t in get_sample_headings()]
+            st.warning("⚠️ 無法自動分析範本結構，將使用預設章節")
+
+        # 顯示範本分析結果
+        with st.expander("📊 範本分析結果", expanded=True):
+            st.write("**檢測到的章節結構：**")
+            for i, title in enumerate(outline_titles, 1):
+                st.write(f"{i}. {title}")
+
+            if template_analyzer:
+                st.write("**範本摘要：**")
+                summary = template_analyzer.generate_outline_summary()
+                st.text_area("範本結構摘要", summary, height=200, disabled=True)
+
+    except Exception as e:
+        st.error(f"❌ 讀取範本文件失敗: {e}")
+        st.info("將使用預設章節結構繼續")
+        template_content = None
+        outline_titles = [t[1] for t in get_sample_headings()]
+    finally:
+        # 清理臨時文件
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+else:
+    # 沒有上傳範本時，使用預設結構
+    st.info("ℹ️ 未上傳範本文件，將使用預設章節結構")
+    outline_titles = [t[1] for t in get_sample_headings()]
+
+st.header("📝 客戶需求設定")
+
+st.write('請填寫新客戶需求與專案基本資訊：')
+customer = st.text_input('客戶名稱/單位', 'XXX公司')
+project_type = st.selectbox('專案類型', ['AI', '系統整合', '數據分析', 'CRM', '其它'])
+customer_need = st.text_area('請描述專案需求(可多行)',
+                           '協助搭建AI驅動數據平台，整合現有系統，提供即時分析和預測功能...',
+                           height=100)
+
+# 檢查 API 狀態
+api_status = "✅ 可用" if os.getenv('GOOGLE_API_KEY') else "⚠️ 未設定 API Key"
+st.info(f"**AI 模型狀態**: {api_status} (使用 Gemini AI)")
+
+# 顯示當前設定摘要
+st.subheader("📋 生成設定摘要")
+col1, col2 = st.columns(2)
+with col1:
+    if template_content:
+        st.success("✅ 已載入範本文件")
+        st.write(f"**範本類型**: {template_file_type.upper()}")
+        st.write(f"**章節數量**: {len(outline_titles)}")
+    else:
+        st.info("📝 使用預設結構")
+
+with col2:
+    st.write(f"**客戶**: {customer}")
+    st.write(f"**專案類型**: {project_type}")
+    st.write(f"**AI 狀態**: {api_status}")
+
+if st.button('🚀 產生專屬建議書', type='primary'):
+    if not customer.strip():
+        st.error("❌ 請輸入客戶名稱")
+        st.stop()
+
+    if not customer_need.strip():
+        st.error("❌ 請描述專案需求")
+        st.stop()
+
+    with st.spinner('🤖 AI 正在根據範本生成內容中...'):
+        # 準備範本信息
+        template_sections = None
+        if template_analyzer:
+            template_sections = template_analyzer.sections
+
+        # 生成內容
+        proposal_raw = gpt_generate(
+            outline_titles,
+            customer_need,
+            template_content=template_content,
+            template_sections=template_sections
+        )
+
+        # 檢查是否為模擬內容
+        is_mock_content = "模擬內容" in proposal_raw
+        if is_mock_content:
+            st.warning("🔄 目前使用模擬內容生成。如需 AI 生成，請設定 Google API Key 或升級免費額度。")
+        else:
+            st.success("🎉 已使用 Gemini AI 根據範本生成專業內容！")
+
+        # 解析生成內容
+        content_blocks = []
+        if proposal_raw.strip():
+            # 嘗試按章節拆分內容
+            sections = proposal_raw.split('\n\n')
+            for section in sections:
+                if section.strip():
+                    content_blocks.append(section.strip())
+
+            # 如果拆分後的區塊數量少於章節數量，用最後的區塊填充
+            while len(content_blocks) < len(outline_titles):
+                content_blocks.append("根據客戶需求和範本分析，此章節內容將在專案細節確認後補充。")
+        else:
+            content_blocks = ['AI自動產生內容' for _ in outline_titles]
+
+        # 生成文件名和保存
+        filename = f'{customer}_{project_type}_建議書.docx'
+        save_path = os.path.join('.', filename)
+        write_proposal_docx(save_path, outline_titles, content_blocks)
+
+        st.success(f'✅ 已產生專屬建議書: {filename}')
+
+        # 下載按鈕
+        with open(save_path, 'rb') as f:
+            st.download_button(
+                label='📥 下載建議書 Word 文件',
+                data=f,
+                file_name=filename,
+                mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                type='primary'
+            )
+
+        # 提供額度相關資訊
+        if is_mock_content:
+            st.info("""
+            **💡 升級建議：**
+            - 前往 [Google AI Studio](https://aistudio.google.com/) 升級付費方案
+            - 或等待每日免費額度重置
+            - 設定環境變數：`$env:GOOGLE_API_KEY="您的金鑰"`
+            """)
+        else:
+            st.balloons()
+            st.info('🎯 建議書已生成！可根據需要進一步修改或聯繫我們討論專案細節。')
+
+# 添加說明區域
+with st.expander("❓ 使用說明", expanded=False):
+    st.markdown("""
+    ### 📖 如何使用
+
+    1. **上傳範本**：選擇現有的服務建議書文件（.docx 或 .pdf）作為範本
+    2. **分析結構**：系統會自動分析範本的章節結構
+    3. **設定需求**：輸入客戶信息和專案需求
+    4. **生成建議書**：AI 會根據範本結構生成類似內容，但針對新客戶需求進行調整
+
+    ### 🎯 功能特色
+
+    - **智慧分析**：自動識別服務建議書的章節結構
+    - **內容改寫**：根據新需求調整範本內容，保持專業風格
+    - **多格式支援**：支援 Word 和 PDF 格式的範本文件
+    - **AI 優化**：使用 Gemini AI 確保內容品質和相關性
+
+    ### 🔧 技術支援
+
+    如遇到問題，請檢查：
+    - 文件格式是否正確
+    - API Key 是否正確設定
+    - 網路連線是否正常
+    """)
