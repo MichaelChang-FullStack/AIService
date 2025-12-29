@@ -34,28 +34,76 @@ if uploaded_file is not None:
 
         st.success(f"✅ 成功讀取範本文件（{template_file_type.upper()}）")
 
-        # 從範本中提取章節結構
-        outline_titles = template_analyzer.get_section_titles()
+        # 從範本中提取原始標題（完全遵照範本的標題順序）
+        original_headings = template_analyzer.get_original_headings() if template_analyzer else []
+        outline_titles = [heading['text'] for heading in original_headings] if original_headings else []
+
         if not outline_titles:
-            # 如果無法自動分析，使用預設結構
-            outline_titles = [t[1] for t in get_sample_headings()]
-            st.warning("⚠️ 無法自動分析範本結構，將使用預設章節")
+            # 如果無法提取標題，使用備用分析結果
+            outline_titles = template_analyzer.get_section_titles() if template_analyzer else []
+            if not outline_titles:
+                # 如果完全無法分析，使用預設結構
+                outline_titles = [t[1] for t in get_sample_headings()]
+                st.warning("⚠️ 無法從範本提取標題，將使用預設章節")
+            else:
+                st.info(f"📝 使用分析出的 {len(outline_titles)} 個標題")
+
+        if original_headings:
+            st.success(f"✅ 已載入範本的 {len(outline_titles)} 個標題，將完全遵照範本結構")
+        else:
+            st.info(f"📝 已載入 {len(outline_titles)} 個標題")
 
         # 顯示範本分析結果
         with st.expander("📊 範本分析結果", expanded=True):
-            st.write("**檢測到的章節結構：**")
-            for i, title in enumerate(outline_titles, 1):
-                st.write(f"{i}. {title}")
+            st.write("**將使用的標題結構：**")
 
-            if template_analyzer:
-                st.write("**範本摘要：**")
-                summary = template_analyzer.generate_outline_summary()
-                st.text_area("範本結構摘要", summary, height=200, disabled=True)
+            if original_headings:
+                st.success("🎯 以下 H1 和 H2 標題將作為目錄標題使用：")
+
+                # 只顯示 H1 和 H2 標題
+                h1_h2_headings = [h for h in original_headings if h['level'] <= 2]
+                for i, heading in enumerate(h1_h2_headings, 1):
+                    level_indicator = "📌" if heading['level'] == 1 else "├─"
+                    st.write(f"{i}. {level_indicator} **{heading['text']}** (Heading {heading['level']}, {heading['source']})")
+
+                st.info("💡 系統只使用 H1 和 H2 標題作為目錄，避免過多細項標題。內容將根據新客戶需求進行改寫。")
+
+                # 統計信息（只統計 H1 和 H2）
+                h1_count = sum(1 for h in h1_h2_headings if h['level'] == 1)
+                h2_count = sum(1 for h in h1_h2_headings if h['level'] == 2)
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("主要標題 (H1)", h1_count)
+                with col2:
+                    st.metric("子標題 (H2)", h2_count)
+            else:
+                # 備用顯示
+                st.warning("⚠️ 無法提取原始標題順序，顯示分析結果：")
+
+                detailed_analysis = template_analyzer.get_detailed_analysis() if template_analyzer else []
+
+                if detailed_analysis:
+                    # 創建表格顯示分析結果
+                    analysis_data = []
+                    for item in detailed_analysis:
+                        analysis_data.append({
+                            '章節標題': item['title'],
+                            '階層等級': item['hierarchy'],
+                            '識別來源': item['source'],
+                            '內容長度': f"{item['content_length']} 字符",
+                            '內容預覽': item['content_preview'][:50] + "..." if len(item['content_preview']) > 50 else item['content_preview']
+                        })
+
+                    st.dataframe(analysis_data, use_container_width=True)
 
     except Exception as e:
         st.error(f"❌ 讀取範本文件失敗: {e}")
         st.info("將使用預設章節結構繼續")
         template_content = None
+        template_analyzer = None
+        template_file_type = "default"
+        original_headings = []
         outline_titles = [t[1] for t in get_sample_headings()]
     finally:
         # 清理臨時文件
@@ -81,12 +129,23 @@ st.info(f"**AI 模型狀態**: {api_status} (使用 Gemini AI)")
 
 # 顯示當前設定摘要
 st.subheader("📋 生成設定摘要")
+
+if template_content and template_analyzer:
+    original_headings = template_analyzer.get_original_headings()
+    if original_headings:
+        st.success("🎯 將使用範本的確切標題結構")
+        with st.expander("查看將使用的標題列表", expanded=False):
+            for i, heading in enumerate(original_headings, 1):
+                st.write(f"{i}. **{heading['text']}** (Heading {heading['level']})")
+    else:
+        st.info("📝 使用分析出的標題結構")
+
 col1, col2 = st.columns(2)
 with col1:
     if template_content:
         st.success("✅ 已載入範本文件")
         st.write(f"**範本類型**: {template_file_type.upper()}")
-        st.write(f"**章節數量**: {len(outline_titles)}")
+        st.write(f"**標題數量**: {len(outline_titles)}")
     else:
         st.info("📝 使用預設結構")
 
@@ -110,12 +169,38 @@ if st.button('🚀 產生專屬建議書', type='primary'):
         if template_analyzer:
             template_sections = template_analyzer.sections
 
+        # 為每個 outline_title 找到對應的範本內容
+        template_sections_for_titles = {}
+        if template_analyzer:
+            for title in outline_titles:
+                # 嘗試精確匹配
+                if title in template_sections:
+                    template_sections_for_titles[title] = template_sections[title]
+                else:
+                    # 如果沒有精確匹配，嘗試模糊匹配
+                    best_match = None
+                    best_score = 0
+                    for section_title, content in template_sections.items():
+                        # 簡單的相似度計算：共同詞彙數量
+                        title_words = set(title.split())
+                        section_words = set(section_title.split())
+                        common_words = title_words.intersection(section_words)
+                        score = len(common_words)
+                        if score > best_score:
+                            best_score = score
+                            best_match = content
+                    if best_match:
+                        template_sections_for_titles[title] = best_match
+                    else:
+                        # 如果還是沒有匹配，使用預設內容
+                        template_sections_for_titles[title] = "根據客戶需求提供專業服務內容"
+
         # 生成內容
         proposal_raw = gpt_generate(
             outline_titles,
             customer_need,
             template_content=template_content,
-            template_sections=template_sections
+            template_sections=template_sections_for_titles
         )
 
         # 檢查是否為模擬內容
@@ -143,7 +228,24 @@ if st.button('🚀 產生專屬建議書', type='primary'):
         # 生成文件名和保存
         filename = f'{customer}_{project_type}_建議書.docx'
         save_path = os.path.join('.', filename)
-        write_proposal_docx(save_path, outline_titles, content_blocks)
+
+        # 傳遞範本文件路徑以複製格式
+        template_file_path = None
+        if uploaded_file:
+            # 重新創建臨時文件路徑，因為原來的可能已被刪除
+            temp_path = f"temp_template_{hash(uploaded_file.name)}.{uploaded_file.name.split('.')[-1]}"
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file.getvalue())
+            template_file_path = temp_path
+
+        write_proposal_docx(save_path, outline_titles, content_blocks, template_analyzer, template_file_path)
+
+        # 清理臨時文件
+        if template_file_path and os.path.exists(template_file_path):
+            try:
+                os.remove(template_file_path)
+            except:
+                pass
 
         st.success(f'✅ 已產生專屬建議書: {filename}')
 
