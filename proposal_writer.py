@@ -1,7 +1,7 @@
 import os
 from docx import Document
 
-def gpt_generate(outline_titles, customer_need, model_name="gemini-2.5-flash-lite", template_content=None, template_sections=None):
+def gpt_generate(outline_titles, customer_need, model_name="gemini-2.5-flash-lite", template_content=None, template_sections=None, rag_database=None):
     """
     使用新版 google.genai (Gemini) 產生建議書內容。
     可選: 提供範本內容和章節結構來生成類似內容。
@@ -19,6 +19,15 @@ def gpt_generate(outline_titles, customer_need, model_name="gemini-2.5-flash-lit
 
             outline_str = "\n".join([f"{i+1}. {t}" for i, t in enumerate(outline_titles)])
 
+            # 整合 RAG 資料庫內容
+            rag_context = ""
+            if rag_database:
+                rag_context = "\n\n【參考資料庫】以下是從 Google Drive 搜尋到的相關服務建議書內容，請作為參考：\n"
+                for file_name, content in list(rag_database.items())[:3]:  # 最多參考 3 個檔案
+                    # 提取關鍵內容片段 (前1000字)
+                    content_preview = content[:1000] + "..." if len(content) > 1000 else content
+                    rag_context += f"\n📄 參考檔案：{file_name}\n{content_preview}\n"
+
             # 如果有範本內容，包含在 prompt 中
             if template_content and template_sections:
                 template_example = "以下是每個章節對應的範本參考內容，請為每個標題生成類似風格和內容的文字：\n\n"
@@ -32,21 +41,38 @@ def gpt_generate(outline_titles, customer_need, model_name="gemini-2.5-flash-lit
                 prompt = (
                     f"請為新客戶需求《{customer_need}》撰寫完整服務建議書。\n\n"
                     f"{template_example}"
+                    f"{rag_context}"
                     f"【重要】請完全使用以下確切的章節標題（不能修改標題名稱）：\n{outline_str}\n\n"
                     f"要求：\n"
                     f"1. 必須使用上面列出的確切標題名稱，不能修改或替換標題\n"
                     f"2. 為每個標題生成內容時，請參考該標題對應的範本內容風格和結構\n"
                     f"3. 內容要與範本風格類似，但根據新客戶需求進行適當調整\n"
-                    f"4. 每個章節需明確分開\n"
-                    f"5. 用繁體中文撰寫\n"
-                    f"6. 每個章節最少100字\n"
-                    f"7. 保持專業服務建議書的格式和語氣\n"
-                    f"8. 確保內容與標題相關，文題相符"
+                    f"4. 請參考【參考資料庫】中的成功案例，學習專業的建議書寫作風格和內容結構\n"
+                    f"5. 每個章節需明確分開\n"
+                    f"6. 用繁體中文撰寫\n"
+                    f"7. 每個章節最少100字\n"
+                    f"8. 保持專業服務建議書的格式和語氣\n"
+                    f"9. 確保內容與標題相關，文題相符"
                 )
             else:
-                prompt = (
-                    f"請根據以下章節，為新客戶需求《{customer_need}》撰寫完整服務建議書，章節架構如下：\n{outline_str}\n\n每個章節需明確分開。用繁體中文，每章節最少100字。"
-                )
+                # 沒有範本但有 RAG 資料庫的情況
+                if rag_database:
+                    prompt = (
+                        f"請為新客戶需求《{customer_need}》撰寫完整服務建議書。\n\n"
+                        f"{rag_context}"
+                        f"請根據以下章節架構撰寫：\n{outline_str}\n\n"
+                        f"要求：\n"
+                        f"1. 參考【參考資料庫】中的成功建議書案例，學習專業寫作風格\n"
+                        f"2. 根據新客戶需求調整內容，但保持類似的專業結構和表達方式\n"
+                        f"3. 每個章節需明確分開\n"
+                        f"4. 用繁體中文撰寫\n"
+                        f"5. 每個章節最少100字\n"
+                        f"6. 保持專業服務建議書的格式和語氣"
+                    )
+                else:
+                    prompt = (
+                        f"請根據以下章節，為新客戶需求《{customer_need}》撰寫完整服務建議書，章節架構如下：\n{outline_str}\n\n每個章節需明確分開。用繁體中文，每章節最少100字。"
+                    )
             
             # 新版 API 呼叫方式
             response = client.models.generate_content(

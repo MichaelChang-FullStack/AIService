@@ -2,7 +2,8 @@ import os
 import streamlit as st
 from docx_analyzer import extract_headings, merge_heading_structures, get_sample_headings
 from proposal_writer import gpt_generate, write_proposal_docx
-from file_reader import extract_template_info
+from file_reader import extract_template_info, ProposalTemplateAnalyzer
+from drive_utils import initialize_drive_client, create_proposal_search_engine
 
 st.title("🤖 AI 服務建議書生成器")
 
@@ -123,6 +124,57 @@ customer_need = st.text_area('請描述專案需求(可多行)',
                            '協助搭建AI驅動數據平台，整合現有系統，提供即時分析和預測功能...',
                            height=100)
 
+# Google Drive RAG 選項
+st.header("🔍 Google Drive RAG 參考資料庫")
+st.write("啟用後，系統將從 Google Drive 搜尋相關的服務建議書作為 AI 寫作參考")
+
+use_rag = st.checkbox("啟用 Google Drive RAG 資料庫", value=False)
+
+rag_database = None
+if use_rag:
+    col1, col2 = st.columns(2)
+    with col1:
+        search_customer = st.text_input('搜尋客戶類型關鍵字',
+                                      value=customer if customer != 'XXX公司' else '',
+                                      help='例如：公司名稱、行業類型')
+    with col2:
+        search_app = st.selectbox('搜尋應用類型',
+                                 ['', 'AI', '系統整合', '數據分析', 'CRM', '網站開發', 'App開發', '其它'],
+                                 help='選擇相關的應用類型')
+
+    if st.button('🔍 搜尋相關建議書', type='secondary'):
+        with st.spinner('正在搜尋 Google Drive 中的相關建議書...'):
+            try:
+                # 初始化 Google Drive 客戶端
+                drive_client = initialize_drive_client()
+                if drive_client:
+                    search_engine = create_proposal_search_engine(drive_client)
+
+                    # 建立 RAG 資料庫
+                    rag_database = search_engine.build_rag_database(
+                        customer_type=search_customer if search_customer else None,
+                        application_type=search_app if search_app else None,
+                        max_files=5
+                    )
+
+                    if rag_database:
+                        st.success(f"✅ 找到 {len(rag_database)} 個相關的服務建議書作為參考")
+                        with st.expander("📚 RAG 參考資料庫內容", expanded=False):
+                            for file_name, content in rag_database.items():
+                                st.subheader(f"📄 {file_name}")
+                                preview = content[:300] + "..." if len(content) > 300 else content
+                                st.text_area(f"內容預覽 ({len(content)} 字符)", preview, height=100, disabled=True)
+                    else:
+                        st.warning("⚠️ 未找到相關的服務建議書，將使用一般模式生成")
+                        use_rag = False
+                else:
+                    st.error("❌ Google Drive 認證失敗，請檢查 credentials.json 設置")
+                    use_rag = False
+
+            except Exception as e:
+                st.error(f"❌ RAG 搜尋失敗: {e}")
+                use_rag = False
+
 # 檢查 API 狀態
 api_status = "✅ 可用" if os.getenv('GOOGLE_API_KEY') else "⚠️ 未設定 API Key"
 st.info(f"**AI 模型狀態**: {api_status} (使用 Gemini AI)")
@@ -176,6 +228,7 @@ if st.button('🚀 產生專屬建議書', type='primary'):
                 # 嘗試精確匹配
                 if title in template_sections:
                     template_sections_for_titles[title] = template_sections[title]
+                    st.write(f"**{title}對應內容**: {template_sections_for_titles[title]}")
                 else:
                     # 如果沒有精確匹配，嘗試模糊匹配
                     best_match = None
@@ -200,7 +253,8 @@ if st.button('🚀 產生專屬建議書', type='primary'):
             outline_titles,
             customer_need,
             template_content=template_content,
-            template_sections=template_sections_for_titles
+            template_sections=template_sections_for_titles,
+            rag_database=rag_database if use_rag and rag_database else None
         )
 
         # 檢查是否為模擬內容
